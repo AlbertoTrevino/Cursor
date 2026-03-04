@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx create-vite@latest client --template react-ts -- --yes)",
+      "Bash(tasklist /FI \"IMAGENAME eq node.exe\")"
+    ]
+  }
+}

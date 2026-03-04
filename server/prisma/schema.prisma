@@ -1,0 +1,210 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── AUTHENTICATION ───
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String   @map("display_name")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  workflows     Workflow[]
+  apiKeys       ApiKey[]
+  uploadedFiles UploadedFile[]
+
+  @@map("users")
+}
+
+// ─── API KEY MANAGEMENT ───
+
+model ApiKey {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  label        String
+  provider     String   // "openai" | "anthropic"
+  encryptedKey String   @map("encrypted_key")
+  iv           String
+  authTag      String   @map("auth_tag")
+  maskedKey    String   @map("masked_key")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cuboNodes WorkflowNode[] @relation("NodeApiKey")
+
+  @@index([userId])
+  @@map("api_keys")
+}
+
+// ─── WORKFLOW (the canvas) ───
+
+model Workflow {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  name        String
+  description String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nodes      WorkflowNode[]
+  edges      WorkflowEdge[]
+  executions Execution[]
+
+  @@index([userId])
+  @@map("workflows")
+}
+
+// ─── NODES ───
+
+model WorkflowNode {
+  id        String   @id @default(uuid())
+  workflowId String  @map("workflow_id")
+  type       String  // "input" | "cuboAI" | "output"
+  subType    String? @map("sub_type")
+  label      String
+  positionX  Float   @map("position_x")
+  positionY  Float   @map("position_y")
+  config     Json    @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  // Cubo AI specific
+  apiKeyId       String?  @map("api_key_id")
+  currentPrompt  String?  @map("current_prompt") @db.Text
+
+  workflow      Workflow       @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  apiKey        ApiKey?        @relation("NodeApiKey", fields: [apiKeyId], references: [id], onDelete: SetNull)
+  outgoingEdges WorkflowEdge[] @relation("SourceNode")
+  incomingEdges WorkflowEdge[] @relation("TargetNode")
+
+  executionResults NodeExecutionResult[]
+  promptVersions   PromptVersion[]
+  feedbacks        Feedback[]
+
+  @@index([workflowId])
+  @@map("workflow_nodes")
+}
+
+// ─── EDGES ───
+
+model WorkflowEdge {
+  id           String  @id @default(uuid())
+  workflowId   String  @map("workflow_id")
+  sourceNodeId String  @map("source_node_id")
+  targetNodeId String  @map("target_node_id")
+  sourceHandle String? @map("source_handle")
+  targetHandle String? @map("target_handle")
+
+  workflow   Workflow     @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  sourceNode WorkflowNode @relation("SourceNode", fields: [sourceNodeId], references: [id], onDelete: Cascade)
+  targetNode WorkflowNode @relation("TargetNode", fields: [targetNodeId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceNodeId, targetNodeId, sourceHandle, targetHandle])
+  @@index([workflowId])
+  @@map("workflow_edges")
+}
+
+// ─── EXECUTION ───
+
+model Execution {
+  id           String    @id @default(uuid())
+  workflowId   String    @map("workflow_id")
+  status        String    @default("pending") // "pending"|"running"|"completed"|"failed"|"paused"
+  mode          String    @default("play") // "play"|"autorun"|"step"
+  currentNodeId String?   @map("current_node_id")
+  startedAt     DateTime? @map("started_at")
+  completedAt   DateTime? @map("completed_at")
+  errorMessage  String?   @map("error_message") @db.Text
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  workflow    Workflow              @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  nodeResults NodeExecutionResult[]
+
+  @@index([workflowId])
+  @@map("executions")
+}
+
+// ─── PER-NODE EXECUTION RESULT ───
+
+model NodeExecutionResult {
+  id           String    @id @default(uuid())
+  executionId  String    @map("execution_id")
+  nodeId       String    @map("node_id")
+  status       String    @default("idle") // "idle"|"running"|"success"|"error"
+  iteration    Int       @default(1)
+  inputData    Json?     @map("input_data")
+  outputData   Json?     @map("output_data")
+  errorMessage String?   @map("error_message") @db.Text
+  durationMs   Int?      @map("duration_ms")
+  startedAt    DateTime? @map("started_at")
+  completedAt  DateTime? @map("completed_at")
+
+  execution Execution    @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  node      WorkflowNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([executionId, nodeId, iteration])
+  @@index([executionId])
+  @@map("node_execution_results")
+}
+
+// ─── PROMPT VERSIONING ───
+
+model PromptVersion {
+  id         String   @id @default(uuid())
+  nodeId     String   @map("node_id")
+  version    Int
+  promptText String   @map("prompt_text") @db.Text
+  source     String   @default("manual") // "manual"|"feedback"|"suggestion"
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  node WorkflowNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@unique([nodeId, version])
+  @@index([nodeId])
+  @@map("prompt_versions")
+}
+
+// ─── FEEDBACK ───
+
+model Feedback {
+  id              String    @id @default(uuid())
+  nodeId          String    @map("node_id")
+  executionId     String    @map("execution_id")
+  rating          Int?
+  feedbackText    String    @map("feedback_text") @db.Text
+  suggestedPrompt String?   @map("suggested_prompt") @db.Text
+  appliedAt       DateTime? @map("applied_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  node WorkflowNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@index([nodeId])
+  @@map("feedbacks")
+}
+
+// ─── FILE UPLOADS ───
+
+model UploadedFile {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  originalName String   @map("original_name")
+  mimeType     String   @map("mime_type")
+  storagePath  String   @map("storage_path")
+  sizeBytes    Int      @map("size_bytes")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("uploaded_files")
+}
