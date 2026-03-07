@@ -2,13 +2,39 @@
 
 ## Cursor Cloud specific instructions
 
-This repository is currently a bare-bones placeholder with only a `README.md`. There are no applications, services, dependencies, build systems, or test suites to run.
+**Cubo AI** — visual AI workflow builder (React + Express + PostgreSQL monorepo using npm workspaces).
 
-- **No package manager lockfiles** — no `package.json`, `requirements.txt`, `go.mod`, `Cargo.toml`, etc.
-- **No services** — no backend, frontend, database, or other infrastructure.
-- **No lint/test/build commands** — nothing to execute yet.
+### Architecture
 
-When source code and dependencies are added to the repository, update this section with:
-1. How to install dependencies (e.g., `pnpm install`, `pip install -r requirements.txt`).
-2. How to run lint, tests, and the dev server.
-3. Any non-obvious caveats discovered during setup.
+| Workspace | Stack | Dev Port |
+|-----------|-------|----------|
+| `client` | React 18 + Vite + Tailwind + Zustand + React Flow | 5173 |
+| `server` | Express + Prisma + Socket.IO + TypeScript | 3001 |
+| `shared` | Shared TypeScript types/constants | — |
+
+### Services
+
+- **PostgreSQL 16**: run via `docker compose up -d` (see `docker-compose.yml`). DB: `cubo_ai`, user: `postgres`, password: `password`.
+- **Server `.env`**: copy from `.env.example` to `server/.env`. Requires `DATABASE_URL`, `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ENCRYPTION_KEY` (64-char hex).
+
+### Commands
+
+| Task | Command |
+|------|---------|
+| Install deps | `npm install` (from repo root) |
+| Run both dev servers | `npm run dev` |
+| Run client only | `npm run dev:client` |
+| Run server only | `npm run dev:server` |
+| Run tests | `npm test -w server` (vitest) |
+| Type-check | `npx tsc --noEmit` in each workspace (`client`, `server`, `shared`) |
+| Prisma migrate (deploy) | `cd server && npx prisma migrate deploy` |
+| Prisma generate | `cd server && npx prisma generate` |
+| Prisma studio | `npm run db:studio -w server` |
+
+### Non-obvious caveats
+
+- **No ESLint config** — the project uses TypeScript strict mode as its lint mechanism. Run `npx tsc --noEmit` per workspace.
+- **Rate limiter on auth routes** — `express-rate-limit` at 20 req / 15 min on `/api/auth/*`. The store is in-memory, so restarting the server resets it. However, if Chrome (or any SPA client) has stale auth tokens in localStorage, it will immediately spam `POST /api/auth/refresh` on page load, burning through the limit before you can interact. **Fix**: kill Chrome, clear `~/.config/google-chrome/Default/Local Storage/` and `Session Storage/`, then restart the server.
+- **Prisma migrations** — use `prisma migrate deploy` (not `prisma migrate dev`) in non-interactive environments.
+- **Docker required** — PostgreSQL runs in Docker. Docker must be started with `sudo dockerd` in this VM (nested container with fuse-overlayfs). See the environment snapshot for pre-installed Docker.
+- **UI language** — the entire UI and API messages are in Spanish (routes like `/flujo/:id`, `/registro`).
