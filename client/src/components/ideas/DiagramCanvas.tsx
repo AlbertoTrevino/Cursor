@@ -43,6 +43,7 @@ export default function DiagramCanvas({ initialData, onSave, onCancel }: Props) 
   const [drawing, setDrawing] = useState(false)
   const [startPos, setStartPos] = useState<{ x: number; y: number } | null>(null)
   const [currentPoints, setCurrentPoints] = useState<number[][]>([])
+  const [textInput, setTextInput] = useState<{ x: number; y: number; value: string } | null>(null)
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current
@@ -116,10 +117,17 @@ export default function DiagramCanvas({ initialData, onSave, onCancel }: Props) 
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    canvas.width = canvas.offsetWidth
-    canvas.height = canvas.offsetHeight
-    redraw()
-  }, [redraw])
+
+    const resizeCanvas = () => {
+      canvas.width = canvas.offsetWidth
+      canvas.height = canvas.offsetHeight
+      redraw()
+    }
+
+    resizeCanvas()
+    window.addEventListener('resize', resizeCanvas)
+    return () => window.removeEventListener('resize', resizeCanvas)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     redraw()
@@ -136,12 +144,7 @@ export default function DiagramCanvas({ initialData, onSave, onCancel }: Props) 
     const pos = getPos(e)
 
     if (tool === 'text') {
-      const text = prompt('Texto:')
-      if (text) {
-        setElements(prev => [...prev, {
-          type: 'text', x: pos.x, y: pos.y, text, color, size: lineWidth,
-        }])
-      }
+      setTextInput({ x: pos.x, y: pos.y, value: '' })
       return
     }
 
@@ -229,9 +232,21 @@ export default function DiagramCanvas({ initialData, onSave, onCancel }: Props) 
   }
 
   const handleClear = () => {
-    if (confirm('¿Limpiar todo el diagrama?')) {
-      setElements([])
+    setElements([])
+  }
+
+  const handleTextInputConfirm = () => {
+    if (textInput && textInput.value.trim()) {
+      setElements(prev => [...prev, {
+        type: 'text' as const,
+        x: textInput.x,
+        y: textInput.y,
+        text: textInput.value.trim(),
+        color,
+        size: lineWidth,
+      }])
     }
+    setTextInput(null)
   }
 
   const handleSave = () => {
@@ -322,6 +337,31 @@ export default function DiagramCanvas({ initialData, onSave, onCancel }: Props) 
         </button>
       </div>
 
+      {/* Text input overlay */}
+      {textInput && (
+        <div className="absolute z-10 bg-white border border-gray-300 rounded-lg shadow-lg p-2 flex gap-1"
+             style={{ left: textInput.x + 64, top: textInput.y + 48 }}>
+          <input
+            autoFocus
+            type="text"
+            value={textInput.value}
+            onChange={(e) => setTextInput({ ...textInput, value: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleTextInputConfirm()
+              if (e.key === 'Escape') setTextInput(null)
+            }}
+            placeholder="Texto..."
+            className="px-2 py-1 border border-gray-200 rounded text-sm w-40 outline-none focus:ring-1 focus:ring-cubo-500"
+          />
+          <button
+            onClick={handleTextInputConfirm}
+            className="px-2 py-1 bg-cubo-600 text-white rounded text-xs"
+          >
+            OK
+          </button>
+        </div>
+      )}
+
       {/* Canvas */}
       <div className="flex-1 overflow-hidden">
         <canvas
@@ -330,7 +370,13 @@ export default function DiagramCanvas({ initialData, onSave, onCancel }: Props) 
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
-          onMouseLeave={() => { if (drawing) handleMouseUp({} as React.MouseEvent) }}
+          onMouseLeave={() => {
+            if (drawing) {
+              setDrawing(false)
+              setStartPos(null)
+              setCurrentPoints([])
+            }
+          }}
         />
       </div>
     </div>

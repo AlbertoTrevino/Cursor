@@ -243,6 +243,7 @@ model Idea {
   attachments IdeaAttachment[]
   diagrams    IdeaDiagram[]
   questions   IdeaClarification[]
+  versions    IdeaVersion[]
 
   @@index([userId])
   @@map("ideas")
@@ -268,7 +269,7 @@ model IdeaDiagram {
   ideaId       String   @map("idea_id")
   name         String   @default("Diagram")
   diagramData  Json?    @map("diagram_data")
-  imageData    String?  @map("image_data") @db.Text
+  imagePath    String?  @map("image_path")
   storagePath  String?  @map("storage_path")
   sourceType   String   @default("excalidraw") @map("source_type") // "excalidraw" | "upload"
   createdAt    DateTime @default(now()) @map("created_at")
@@ -294,15 +295,37 @@ model IdeaClarification {
   @@map("idea_clarifications")
 }
 
+model IdeaVersion {
+  id              String   @id @default(uuid())
+  ideaId          String   @map("idea_id")
+  version         Int
+  claudeResponse  String?  @map("claude_response") @db.Text
+  gptResponse     String?  @map("gpt_response") @db.Text
+  mergedResponse  String?  @map("merged_response") @db.Text
+  handoffText     String?  @map("handoff_text") @db.Text
+  recommendation  String?
+  recommendReason String?  @map("recommend_reason") @db.Text
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+
+  @@unique([ideaId, version])
+  @@index([ideaId])
+  @@map("idea_versions")
+}
+
 model FabricConnection {
-  id          String   @id @default(uuid())
-  userId      String   @map("user_id")
-  name        String
-  config      Json     @default("{}")
-  status      String   @default("disconnected") // "connected" | "disconnected" | "error"
-  lastError   String?  @map("last_error") @db.Text
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  name           String
+  config         Json     @default("{}")
+  encryptedSecret String? @map("encrypted_secret")
+  secretIv       String?  @map("secret_iv")
+  secretAuthTag  String?  @map("secret_auth_tag")
+  status         String   @default("disconnected") // "connected" | "disconnected" | "error"
+  lastError      String?  @map("last_error") @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

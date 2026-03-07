@@ -1,8 +1,31 @@
 import type { Response } from 'express'
 import { z } from 'zod'
+import fs from 'fs/promises'
+import path from 'path'
 import { prisma } from '../config/database.js'
+import { env } from '../config/env.js'
 import type { AuthRequest } from '../middleware/auth.middleware.js'
 import { AppError } from '../utils/AppError.js'
+
+const ATTACHMENT_SAFE_SELECT = {
+  id: true,
+  ideaId: true,
+  originalName: true,
+  mimeType: true,
+  sizeBytes: true,
+  createdAt: true,
+}
+
+const DIAGRAM_SAFE_SELECT = {
+  id: true,
+  ideaId: true,
+  name: true,
+  diagramData: true,
+  imagePath: true,
+  sourceType: true,
+  createdAt: true,
+  updatedAt: true,
+}
 
 const createIdeaSchema = z.object({
   title: z.string().min(1, 'Título requerido'),
@@ -30,24 +53,80 @@ const answerClarificationSchema = z.object({
   })),
 })
 
+const saveDiagramSchema = z.object({
+  name: z.string().default('Diagrama'),
+  diagramData: z.any().optional(),
+  imageData: z.string().optional(),
+  sourceType: z.enum(['excalidraw', 'upload']).default('excalidraw'),
+})
+
+const updateDiagramSchema = z.object({
+  name: z.string().optional(),
+  diagramData: z.any().optional(),
+  imageData: z.string().optional(),
+})
+
+async function saveImageToDisk(imageData: string, ideaId: string): Promise<string> {
+  const diagramDir = path.resolve(env.UPLOAD_DIR, 'diagrams')
+  await fs.mkdir(diagramDir, { recursive: true })
+
+  const base64Match = imageData.match(/^data:image\/(\w+);base64,(.+)$/)
+  if (!base64Match) throw new Error('Formato de imagen inválido')
+
+  const ext = base64Match[1] === 'svg+xml' ? 'svg' : base64Match[1]
+  const buffer = Buffer.from(base64Match[2], 'base64')
+  const filename = `${ideaId}-${Date.now()}.${ext}`
+  const filePath = path.join(diagramDir, filename)
+
+  await fs.writeFile(filePath, buffer)
+  return `/api/ideas/diagrams/image/${filename}`
+}
+
 export async function listIdeas(req: AuthRequest, res: Response): Promise<void> {
   const userId = req.userId as string
-  const ideas = await prisma.idea.findMany({
-    where: { userId },
-    select: {
-      id: true,
-      title: true,
-      description: true,
-      mode: true,
-      status: true,
-      recommendation: true,
-      createdAt: true,
-      updatedAt: true,
-      _count: { select: { attachments: true, diagrams: true } },
-    },
-    orderBy: { updatedAt: 'desc' },
-  })
-  res.json(ideas)
+
+  const page = Math.max(1, parseInt(req.query.page as string) || 1)
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20))
+  const search = (req.query.search as string || '').trim()
+  const status = req.query.status as string || ''
+  const mode = req.query.mode as string || ''
+
+  const where: any = { userId }
+  if (search) {
+    where.OR = [
+      { title: { contains: search, mode: 'insensitive' } },
+      { description: { contains: search, mode: 'insensitive' } },
+    ]
+  }
+  if (status && ['draft', 'clarifying', 'processing', 'done'].includes(status)) {
+    where.status = status
+  }
+  if (mode && ['simple', 'complex'].includes(mode)) {
+    where.mode = mode
+  }
+
+  const [ideas, total] = await Promise.all([
+    prisma.idea.findMany({
+      where,
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        mode: true,
+        status: true,
+        recommendation: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: { select: { attachments: true, diagrams: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prisma.idea.count({ where }),
+  ])
+
+  res.json({ ideas, total, page, limit })
 }
 
 export async function getIdea(req: AuthRequest, res: Response): Promise<void> {
@@ -57,8 +136,8 @@ export async function getIdea(req: AuthRequest, res: Response): Promise<void> {
   const idea = await prisma.idea.findFirst({
     where: { id: ideaId, userId },
     include: {
-      attachments: { orderBy: { createdAt: 'asc' } },
-      diagrams: { orderBy: { createdAt: 'asc' } },
+      attachments: { select: ATTACHMENT_SAFE_SELECT, orderBy: { createdAt: 'asc' } },
+      diagrams: { select: DIAGRAM_SAFE_SELECT, orderBy: { createdAt: 'asc' } },
       questions: { orderBy: { ordering: 'asc' } },
     },
   })
@@ -121,23 +200,30 @@ export async function answerClarifications(req: AuthRequest, res: Response): Pro
   const idea = await prisma.idea.findFirst({ where: { id: ideaId, userId } })
   if (!idea) throw AppError.notFound('Idea no encontrada')
 
-  for (const a of answers) {
-    await prisma.ideaClarification.update({
+  // Verify all clarification IDs belong to this idea
+  const validIds = await prisma.ideaClarification.findMany({
+    where: { ideaId, id: { in: answers.map(a => a.id) } },
+    select: { id: true },
+  })
+  const validIdSet = new Set(validIds.map(v => v.id))
+
+  const operations = answers
+    .filter(a => validIdSet.has(a.id))
+    .map(a => prisma.ideaClarification.update({
       where: { id: a.id },
       data: { answer: a.answer },
-    })
-  }
+    }))
 
-  await prisma.idea.update({
-    where: { id: ideaId },
-    data: { status: 'draft' },
-  })
+  await prisma.$transaction([
+    ...operations,
+    prisma.idea.update({ where: { id: ideaId }, data: { status: 'draft' } }),
+  ])
 
   const updated = await prisma.idea.findFirst({
     where: { id: ideaId },
     include: {
-      attachments: true,
-      diagrams: true,
+      attachments: { select: ATTACHMENT_SAFE_SELECT },
+      diagrams: { select: DIAGRAM_SAFE_SELECT },
       questions: { orderBy: { ordering: 'asc' } },
     },
   })
@@ -166,6 +252,7 @@ export async function uploadIdeaAttachment(req: AuthRequest, res: Response): Pro
       storagePath: file.path,
       sizeBytes: file.size,
     },
+    select: ATTACHMENT_SAFE_SELECT,
   })
 
   res.status(201).json(attachment)
@@ -184,8 +271,6 @@ export async function deleteIdeaAttachment(req: AuthRequest, res: Response): Pro
   })
   if (!attachment) throw AppError.notFound('Adjunto no encontrado')
 
-  const fs = await import('fs/promises')
-  const path = await import('path')
   try {
     await fs.unlink(path.resolve(attachment.storagePath))
   } catch {
@@ -203,16 +288,22 @@ export async function saveDiagram(req: AuthRequest, res: Response): Promise<void
   const idea = await prisma.idea.findFirst({ where: { id: ideaId, userId } })
   if (!idea) throw AppError.notFound('Idea no encontrada')
 
-  const { name, diagramData, imageData, sourceType } = req.body
+  const body = saveDiagramSchema.parse(req.body)
+
+  let imagePath: string | null = null
+  if (body.imageData) {
+    imagePath = await saveImageToDisk(body.imageData, ideaId)
+  }
 
   const diagram = await prisma.ideaDiagram.create({
     data: {
       ideaId,
-      name: name || 'Diagram',
-      diagramData: diagramData || undefined,
-      imageData: imageData || undefined,
-      sourceType: sourceType || 'excalidraw',
+      name: body.name,
+      diagramData: body.diagramData || undefined,
+      imagePath,
+      sourceType: body.sourceType,
     },
+    select: DIAGRAM_SAFE_SELECT,
   })
 
   res.status(201).json(diagram)
@@ -231,15 +322,21 @@ export async function updateDiagram(req: AuthRequest, res: Response): Promise<vo
   })
   if (!existing) throw AppError.notFound('Diagrama no encontrado')
 
-  const { name, diagramData, imageData } = req.body
+  const body = updateDiagramSchema.parse(req.body)
+
+  let imagePath = existing.imagePath
+  if (body.imageData) {
+    imagePath = await saveImageToDisk(body.imageData, ideaId)
+  }
 
   const diagram = await prisma.ideaDiagram.update({
     where: { id: diagramId },
     data: {
-      ...(name !== undefined && { name }),
-      ...(diagramData !== undefined && { diagramData }),
-      ...(imageData !== undefined && { imageData }),
+      ...(body.name !== undefined && { name: body.name }),
+      ...(body.diagramData !== undefined && { diagramData: body.diagramData }),
+      imagePath,
     },
+    select: DIAGRAM_SAFE_SELECT,
   })
 
   res.json(diagram)
@@ -255,4 +352,17 @@ export async function deleteDiagram(req: AuthRequest, res: Response): Promise<vo
 
   await prisma.ideaDiagram.delete({ where: { id: diagramId } })
   res.json({ message: 'Diagrama eliminado' })
+}
+
+export async function serveDiagramImage(req: AuthRequest, res: Response): Promise<void> {
+  const filename = req.params.filename as string
+  const diagramDir = path.resolve(env.UPLOAD_DIR, 'diagrams')
+  const filePath = path.join(diagramDir, filename)
+
+  try {
+    await fs.access(filePath)
+    res.sendFile(filePath)
+  } catch {
+    res.status(404).json({ message: 'Imagen no encontrada' })
+  }
 }

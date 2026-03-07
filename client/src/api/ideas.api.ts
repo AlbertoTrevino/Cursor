@@ -1,17 +1,19 @@
 import api from './axios'
 import type {
   Idea,
-  IdeaSummary,
+  IdeasListResponse,
   IdeaAttachment,
   IdeaDiagram,
   ProcessResult,
   ClarificationResult,
   NamingSuggestion,
+  IdeaVersionSummary,
+  IdeaVersion,
 } from '@/types/idea'
 
 export const ideasApi = {
-  list: () =>
-    api.get<IdeaSummary[]>('/ideas'),
+  list: (params?: { page?: number; limit?: number; search?: string; status?: string; mode?: string }) =>
+    api.get<IdeasListResponse>('/ideas', { params }),
 
   get: (id: string) =>
     api.get<Idea>(`/ideas/${id}`),
@@ -46,8 +48,8 @@ export const ideasApi = {
   answerClarifications: (id: string, answers: Array<{ id: string; answer: string }>) =>
     api.post<Idea>(`/ideas/${id}/answer`, { answers }),
 
-  process: (id: string) =>
-    api.post<ProcessResult>(`/ideas/${id}/process`),
+  process: (id: string, signal?: AbortSignal) =>
+    api.post<ProcessResult>(`/ideas/${id}/process`, {}, { signal }),
 
   regenerateHandoff: (id: string) =>
     api.post<{ handoffText: string }>(`/ideas/${id}/handoff`),
@@ -83,4 +85,10 @@ export const ideasApi = {
 
   deleteDiagram: (ideaId: string, diagramId: string) =>
     api.delete(`/ideas/${ideaId}/diagrams/${diagramId}`),
+
+  listVersions: (ideaId: string) =>
+    api.get<IdeaVersionSummary[]>(`/ideas/${ideaId}/versions`),
+
+  getVersion: (ideaId: string, versionId: string) =>
+    api.get<IdeaVersion>(`/ideas/${ideaId}/versions/${versionId}`),
 }

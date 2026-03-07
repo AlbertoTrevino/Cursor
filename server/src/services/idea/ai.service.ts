@@ -1,35 +1,11 @@
 import OpenAI from 'openai'
 import Anthropic from '@anthropic-ai/sdk'
+import fs from 'fs/promises'
+import path from 'path'
 import { prisma } from '../../config/database.js'
-import { encryptionService } from '../encryption.service.js'
 import { logger } from '../../config/logger.js'
-
-interface AIKeys {
-  openaiKey?: string
-  anthropicKey?: string
-}
-
-async function getUserAIKeys(userId: string): Promise<AIKeys> {
-  const keys = await prisma.apiKey.findMany({
-    where: { userId, provider: { in: ['openai', 'anthropic'] } },
-  })
-
-  const result: AIKeys = {}
-  for (const k of keys) {
-    const decrypted = encryptionService.decrypt(k.encryptedKey, k.iv, k.authTag)
-    if (k.provider === 'openai') result.openaiKey = decrypted
-    if (k.provider === 'anthropic') result.anthropicKey = decrypted
-  }
-
-  if (!result.openaiKey && process.env.OPENAI_API_KEY) {
-    result.openaiKey = process.env.OPENAI_API_KEY
-  }
-  if (!result.anthropicKey && process.env.ANTHROPIC_API_KEY) {
-    result.anthropicKey = process.env.ANTHROPIC_API_KEY
-  }
-
-  return result
-}
+import { getUserAIKeys } from './keys.service.js'
+import { AI_MODELS } from '../../config/ai.js'
 
 function buildIdeaPrompt(idea: {
   title: string
@@ -39,6 +15,7 @@ function buildIdeaPrompt(idea: {
   affectedAreas?: string | null
   structuralNotes?: string | null
   clarificationAnswers?: Array<{ question: string; answer: string | null }>
+  attachmentSummaries?: string[]
 }): string {
   let prompt = `You are an expert project analyst helping structure a software idea into a clear, actionable description for AI coding assistants (like Cursor).
 
@@ -66,6 +43,13 @@ function buildIdeaPrompt(idea: {
     }
   }
 
+  if (idea.attachmentSummaries?.length) {
+    prompt += '\n\n## Attached File Contents'
+    for (const summary of idea.attachmentSummaries) {
+      prompt += `\n${summary}`
+    }
+  }
+
   prompt += `
 
 ## Your Task
@@ -83,10 +67,62 @@ Be specific, practical, and actionable. Do not invent requirements—only analyz
   return prompt
 }
 
+async function readTextAttachment(storagePath: string, mimeType: string): Promise<string | null> {
+  try {
+    const absPath = path.resolve(storagePath)
+    const textMimes = ['text/csv', 'text/plain', 'application/json', 'application/xml', 'text/xml', 'application/sql']
+    if (textMimes.includes(mimeType)) {
+      const content = await fs.readFile(absPath, 'utf-8')
+      return content.slice(0, 5000)
+    }
+  } catch {
+    // File unreadable, skip
+  }
+  return null
+}
+
+async function getAttachmentSummaries(ideaId: string): Promise<string[]> {
+  const attachments = await prisma.ideaAttachment.findMany({ where: { ideaId } })
+  const summaries: string[] = []
+
+  for (const att of attachments) {
+    const content = await readTextAttachment(att.storagePath, att.mimeType)
+    if (content) {
+      summaries.push(`### File: ${att.originalName} (${att.mimeType})\n\`\`\`\n${content}\n\`\`\``)
+    } else {
+      summaries.push(`### File: ${att.originalName} (${att.mimeType}, ${att.sizeBytes} bytes) — binary, not included inline`)
+    }
+  }
+
+  return summaries
+}
+
+async function getDiagramDescriptions(ideaId: string): Promise<string[]> {
+  const diagrams = await prisma.ideaDiagram.findMany({ where: { ideaId } })
+  const descriptions: string[] = []
+
+  for (const d of diagrams) {
+    if (d.diagramData && typeof d.diagramData === 'object') {
+      const data = d.diagramData as { elements?: Array<{ type: string; text?: string }> }
+      if (data.elements?.length) {
+        const textElements = data.elements
+          .filter(e => e.text)
+          .map(e => `[${e.type}] ${e.text}`)
+          .join(', ')
+        if (textElements) {
+          descriptions.push(`### Diagram: ${d.name}\nElements: ${textElements}`)
+        }
+      }
+    }
+  }
+
+  return descriptions
+}
+
 async function callGPT(apiKey: string, prompt: string): Promise<string> {
   const openai = new OpenAI({ apiKey })
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: AI_MODELS.GPT,
     messages: [{ role: 'user', content: prompt }],
     max_tokens: 4000,
     temperature: 0.3,
@@ -97,7 +133,7 @@ async function callGPT(apiKey: string, prompt: string): Promise<string> {
 async function callClaude(apiKey: string, prompt: string): Promise<string> {
   const anthropic = new Anthropic({ apiKey })
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: AI_MODELS.CLAUDE,
     max_tokens: 4000,
     messages: [{ role: 'user', content: prompt }],
   })
@@ -135,12 +171,35 @@ Produce the final merged analysis in this format:
 ### Additional Insights (anything one analysis caught that the other missed)`
 
   const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: AI_MODELS.CLAUDE,
     max_tokens: 6000,
     messages: [{ role: 'user', content: mergePrompt }],
   })
   const block = response.content[0]
   return block.type === 'text' ? block.text : ''
+}
+
+async function saveVersion(ideaId: string): Promise<void> {
+  const idea = await prisma.idea.findUnique({ where: { id: ideaId } })
+  if (!idea || !idea.mergedResponse) return
+
+  const lastVersion = await prisma.ideaVersion.findFirst({
+    where: { ideaId },
+    orderBy: { version: 'desc' },
+  })
+
+  await prisma.ideaVersion.create({
+    data: {
+      ideaId,
+      version: (lastVersion?.version ?? 0) + 1,
+      claudeResponse: idea.claudeResponse,
+      gptResponse: idea.gptResponse,
+      mergedResponse: idea.mergedResponse,
+      handoffText: idea.handoffText,
+      recommendation: idea.recommendation,
+      recommendReason: idea.recommendReason,
+    },
+  })
 }
 
 export async function processIdeaWithAI(ideaId: string, userId: string): Promise<{
@@ -151,7 +210,7 @@ export async function processIdeaWithAI(ideaId: string, userId: string): Promise
   const keys = await getUserAIKeys(userId)
 
   if (!keys.openaiKey && !keys.anthropicKey) {
-    throw new Error('No API keys configured. Please add your OpenAI and/or Anthropic API keys in Settings.')
+    throw new Error('No hay API keys configuradas. Agrega tus keys de OpenAI o Anthropic en Configuración.')
   }
 
   const idea = await prisma.idea.findFirst({
@@ -161,7 +220,13 @@ export async function processIdeaWithAI(ideaId: string, userId: string): Promise
     },
   })
 
-  if (!idea) throw new Error('Idea not found')
+  if (!idea) throw new Error('Idea no encontrada')
+
+  // Save previous version before overwriting
+  await saveVersion(ideaId)
+
+  const attachmentSummaries = await getAttachmentSummaries(ideaId)
+  const diagramDescriptions = await getDiagramDescriptions(ideaId)
 
   const prompt = buildIdeaPrompt({
     ...idea,
@@ -169,6 +234,7 @@ export async function processIdeaWithAI(ideaId: string, userId: string): Promise
       question: q.question,
       answer: q.answer,
     })),
+    attachmentSummaries: [...attachmentSummaries, ...diagramDescriptions],
   })
 
   await prisma.idea.update({
@@ -179,54 +245,58 @@ export async function processIdeaWithAI(ideaId: string, userId: string): Promise
   let gptResponse = ''
   let claudeResponse = ''
 
-  const promises: Promise<void>[] = []
+  try {
+    const promises: Promise<void>[] = []
 
-  if (keys.openaiKey) {
-    promises.push(
-      callGPT(keys.openaiKey, prompt)
-        .then(r => { gptResponse = r })
-        .catch(err => {
-          logger.error({ err }, 'GPT call failed')
-          gptResponse = `[GPT Error: ${err.message}]`
-        })
-    )
-  }
-
-  if (keys.anthropicKey) {
-    promises.push(
-      callClaude(keys.anthropicKey, prompt)
-        .then(r => { claudeResponse = r })
-        .catch(err => {
-          logger.error({ err }, 'Claude call failed')
-          claudeResponse = `[Claude Error: ${err.message}]`
-        })
-    )
-  }
-
-  await Promise.all(promises)
-
-  let mergedResponse = ''
-
-  if (gptResponse && claudeResponse && keys.anthropicKey &&
-      !gptResponse.startsWith('[GPT Error') && !claudeResponse.startsWith('[Claude Error')) {
-    try {
-      mergedResponse = await mergeByClaude(keys.anthropicKey, gptResponse, claudeResponse, idea.title)
-    } catch (err: any) {
-      logger.error({ err }, 'Merge call failed')
-      mergedResponse = `[Merge Error: ${err.message}]\n\n--- GPT Response ---\n${gptResponse}\n\n--- Claude Response ---\n${claudeResponse}`
+    if (keys.openaiKey) {
+      promises.push(
+        callGPT(keys.openaiKey, prompt)
+          .then(r => { gptResponse = r })
+          .catch(err => {
+            logger.error({ err }, 'GPT call failed')
+            gptResponse = `[Error GPT: ${err.message}]`
+          })
+      )
     }
-  } else {
-    mergedResponse = claudeResponse || gptResponse || 'No AI responses available.'
+
+    if (keys.anthropicKey) {
+      promises.push(
+        callClaude(keys.anthropicKey, prompt)
+          .then(r => { claudeResponse = r })
+          .catch(err => {
+            logger.error({ err }, 'Claude call failed')
+            claudeResponse = `[Error Claude: ${err.message}]`
+          })
+      )
+    }
+
+    await Promise.all(promises)
+
+    let mergedResponse = ''
+
+    if (gptResponse && claudeResponse && keys.anthropicKey &&
+        !gptResponse.startsWith('[Error GPT') && !claudeResponse.startsWith('[Error Claude')) {
+      try {
+        mergedResponse = await mergeByClaude(keys.anthropicKey, gptResponse, claudeResponse, idea.title)
+      } catch (err: any) {
+        logger.error({ err }, 'Merge call failed')
+        mergedResponse = `[Error al combinar: ${err.message}]\n\n--- Respuesta GPT ---\n${gptResponse}\n\n--- Respuesta Claude ---\n${claudeResponse}`
+      }
+    } else {
+      mergedResponse = claudeResponse || gptResponse || 'No hay respuestas de AI disponibles.'
+    }
+
+    await prisma.idea.update({
+      where: { id: ideaId },
+      data: { claudeResponse, gptResponse, mergedResponse },
+    })
+
+    return { claudeResponse, gptResponse, mergedResponse }
+  } catch (err) {
+    await prisma.idea.update({
+      where: { id: ideaId },
+      data: { status: 'draft' },
+    })
+    throw err
   }
-
-  await prisma.idea.update({
-    where: { id: ideaId },
-    data: {
-      claudeResponse,
-      gptResponse,
-      mergedResponse,
-    },
-  })
-
-  return { claudeResponse, gptResponse, mergedResponse }
 }

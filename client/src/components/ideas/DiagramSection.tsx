@@ -157,9 +157,9 @@ export default function DiagramSection({ ideaId, diagrams, onChanged }: Props) {
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
           {diagrams.map((d) => (
             <div key={d.id} className="relative group border border-gray-200 rounded-xl overflow-hidden bg-gray-50">
-              {d.imageData ? (
+              {d.imagePath ? (
                 <img
-                  src={d.imageData}
+                  src={d.imagePath}
                   alt={d.name}
                   className="w-full h-32 object-contain p-2"
                 />

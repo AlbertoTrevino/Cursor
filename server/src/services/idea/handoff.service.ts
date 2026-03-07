@@ -1,8 +1,8 @@
 import { prisma } from '../../config/database.js'
 
-export async function generateHandoff(ideaId: string): Promise<string> {
+export async function generateHandoff(ideaId: string, userId: string): Promise<string> {
   const idea = await prisma.idea.findFirst({
-    where: { id: ideaId },
+    where: { id: ideaId, userId },
     include: {
       attachments: true,
       diagrams: true,
@@ -10,7 +10,7 @@ export async function generateHandoff(ideaId: string): Promise<string> {
     },
   })
 
-  if (!idea) throw new Error('Idea not found')
+  if (!idea) throw new Error('Idea no encontrada')
 
   const mergedAnalysis = idea.mergedResponse || idea.claudeResponse || idea.gptResponse || ''
 

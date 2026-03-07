@@ -1,25 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
-import { prisma } from '../../config/database.js'
-import { encryptionService } from '../encryption.service.js'
 import { logger } from '../../config/logger.js'
-
-async function getAnyAIKey(userId: string): Promise<{ provider: 'openai' | 'anthropic'; key: string }> {
-  const keys = await prisma.apiKey.findMany({
-    where: { userId, provider: { in: ['openai', 'anthropic'] } },
-    orderBy: { createdAt: 'desc' },
-  })
-
-  for (const k of keys) {
-    const decrypted = encryptionService.decrypt(k.encryptedKey, k.iv, k.authTag)
-    return { provider: k.provider as 'openai' | 'anthropic', key: decrypted }
-  }
-
-  if (process.env.ANTHROPIC_API_KEY) return { provider: 'anthropic', key: process.env.ANTHROPIC_API_KEY }
-  if (process.env.OPENAI_API_KEY) return { provider: 'openai', key: process.env.OPENAI_API_KEY }
-
-  throw new Error('No API keys available')
-}
+import { getAnyAIKey } from './keys.service.js'
+import { AI_MODELS } from '../../config/ai.js'
 
 export interface NamingSuggestion {
   original: string
@@ -50,7 +33,7 @@ If naming is already consistent, respond with an empty array: []`
     if (provider === 'anthropic') {
       const anthropic = new Anthropic({ apiKey: key })
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: AI_MODELS.CLAUDE,
         max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }],
       })
@@ -59,7 +42,7 @@ If naming is already consistent, respond with an empty array: []`
     } else {
       const openai = new OpenAI({ apiKey: key })
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: AI_MODELS.GPT,
         messages: [{ role: 'user', content: prompt }],
         max_tokens: 1000,
         temperature: 0.1,
@@ -72,7 +55,7 @@ If naming is already consistent, respond with an empty array: []`
 
     return JSON.parse(jsonMatch[0]) as NamingSuggestion[]
   } catch (err) {
-    logger.error({ err }, 'Naming analysis failed')
+    logger.error({ err }, 'Análisis de nombres falló')
     return []
   }
 }

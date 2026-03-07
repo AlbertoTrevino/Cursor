@@ -1,29 +1,9 @@
 import OpenAI from 'openai'
 import Anthropic from '@anthropic-ai/sdk'
 import { prisma } from '../../config/database.js'
-import { encryptionService } from '../encryption.service.js'
 import { logger } from '../../config/logger.js'
-
-async function getAnyAIKey(userId: string): Promise<{ provider: 'openai' | 'anthropic'; key: string }> {
-  const keys = await prisma.apiKey.findMany({
-    where: { userId, provider: { in: ['openai', 'anthropic'] } },
-    orderBy: { createdAt: 'desc' },
-  })
-
-  for (const k of keys) {
-    const decrypted = encryptionService.decrypt(k.encryptedKey, k.iv, k.authTag)
-    return { provider: k.provider as 'openai' | 'anthropic', key: decrypted }
-  }
-
-  if (process.env.ANTHROPIC_API_KEY) {
-    return { provider: 'anthropic', key: process.env.ANTHROPIC_API_KEY }
-  }
-  if (process.env.OPENAI_API_KEY) {
-    return { provider: 'openai', key: process.env.OPENAI_API_KEY }
-  }
-
-  throw new Error('No API keys available for clarification analysis')
-}
+import { getAnyAIKey } from './keys.service.js'
+import { AI_MODELS } from '../../config/ai.js'
 
 function buildClarificationPrompt(idea: {
   title: string
@@ -69,7 +49,7 @@ export async function analyzeForClarification(ideaId: string, userId: string): P
   questions: Array<{ question: string; ordering: number }>
 }> {
   const idea = await prisma.idea.findFirst({ where: { id: ideaId, userId } })
-  if (!idea) throw new Error('Idea not found')
+  if (!idea) throw new Error('Idea no encontrada')
 
   const { provider, key } = await getAnyAIKey(userId)
   const prompt = buildClarificationPrompt(idea)
@@ -80,7 +60,7 @@ export async function analyzeForClarification(ideaId: string, userId: string): P
     if (provider === 'anthropic') {
       const anthropic = new Anthropic({ apiKey: key })
       const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: AI_MODELS.CLAUDE,
         max_tokens: 1500,
         messages: [{ role: 'user', content: prompt }],
       })
@@ -89,7 +69,7 @@ export async function analyzeForClarification(ideaId: string, userId: string): P
     } else {
       const openai = new OpenAI({ apiKey: key })
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: AI_MODELS.GPT,
         messages: [{ role: 'user', content: prompt }],
         max_tokens: 1500,
         temperature: 0.2,
@@ -97,7 +77,7 @@ export async function analyzeForClarification(ideaId: string, userId: string): P
       responseText = response.choices[0]?.message?.content || ''
     }
   } catch (err: any) {
-    logger.error({ err }, 'Clarification analysis failed')
+    logger.error({ err }, 'Análisis de aclaración falló')
     return { needsClarification: false, questions: [] }
   }
 
@@ -116,27 +96,20 @@ export async function analyzeForClarification(ideaId: string, userId: string): P
     const questions = JSON.parse(jsonMatch[0]) as Array<{ question: string; ordering: number }>
 
     if (questions.length > 0) {
-      await prisma.ideaClarification.deleteMany({ where: { ideaId } })
-
-      for (const q of questions) {
-        await prisma.ideaClarification.create({
-          data: {
-            ideaId,
-            question: q.question,
-            ordering: q.ordering ?? 0,
-          },
-        })
-      }
-
-      await prisma.idea.update({
-        where: { id: ideaId },
-        data: { status: 'clarifying' },
-      })
+      await prisma.$transaction([
+        prisma.ideaClarification.deleteMany({ where: { ideaId } }),
+        ...questions.map(q =>
+          prisma.ideaClarification.create({
+            data: { ideaId, question: q.question, ordering: q.ordering ?? 0 },
+          })
+        ),
+        prisma.idea.update({ where: { id: ideaId }, data: { status: 'clarifying' } }),
+      ])
     }
 
     return { needsClarification: questions.length > 0, questions }
   } catch (err) {
-    logger.error({ err, response: trimmed }, 'Failed to parse clarification response')
+    logger.error({ err, response: trimmed }, 'Error al parsear respuesta de aclaración')
     return { needsClarification: false, questions: [] }
   }
 }

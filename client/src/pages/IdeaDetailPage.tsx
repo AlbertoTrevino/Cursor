@@ -1,17 +1,18 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Save, Trash2, Sparkles,
-  Copy, Check, FileText, Zap
+  Copy, Check, FileText, Zap, Download, History
 } from 'lucide-react'
 import { ideasApi } from '@/api/ideas.api'
-import type { Idea, NamingSuggestion } from '@/types/idea'
+import type { Idea, NamingSuggestion, IdeaVersionSummary } from '@/types/idea'
 import ClarificationDialog from '@/components/ideas/ClarificationDialog'
 import AIProcessingView from '@/components/ideas/AIProcessingView'
 import HandoffDisplay from '@/components/ideas/HandoffDisplay'
 import DiagramSection from '@/components/ideas/DiagramSection'
 import FileUploadZone from '@/components/ideas/FileUploadZone'
 import NamingSuggestions from '@/components/ideas/NamingSuggestions'
+import ConfirmDialog from '@/components/ideas/ConfirmDialog'
 import toast from 'react-hot-toast'
 
 export default function IdeaDetailPage() {
@@ -25,9 +26,14 @@ export default function IdeaDetailPage() {
   const [processingStep, setProcessingStep] = useState('')
   const [copied, setCopied] = useState(false)
   const [namingSuggestions, setNamingSuggestions] = useState<NamingSuggestion[]>([])
+  const [checkingNames, setCheckingNames] = useState(false)
   const [activeTab, setActiveTab] = useState<'edit' | 'result'>('edit')
+  const [isDirty, setIsDirty] = useState(false)
+  const [deleteConfirm, setDeleteConfirm] = useState(false)
+  const [versions, setVersions] = useState<IdeaVersionSummary[]>([])
+  const [showVersions, setShowVersions] = useState(false)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
-  // Editable fields
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [mode, setMode] = useState<'simple' | 'complex'>('simple')
@@ -46,6 +52,7 @@ export default function IdeaDetailPage() {
       setProjectContext(data.projectContext || '')
       setAffectedAreas(data.affectedAreas || '')
       setStructuralNotes(data.structuralNotes || '')
+      setIsDirty(false)
       if (data.status === 'done') setActiveTab('result')
     } catch {
       toast.error('Error al cargar la idea')
@@ -58,6 +65,18 @@ export default function IdeaDetailPage() {
   useEffect(() => {
     fetchIdea()
   }, [fetchIdea])
+
+  // Unsaved changes warning
+  useEffect(() => {
+    if (!isDirty) return
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [isDirty])
+
+  const markDirty = () => setIsDirty(true)
 
   const handleSave = async () => {
     if (!id || !idea) return
@@ -72,6 +91,7 @@ export default function IdeaDetailPage() {
         structuralNotes: mode === 'complex' ? structuralNotes.trim() || null : null,
       })
       setIdea({ ...idea, ...data })
+      setIsDirty(false)
       toast.success('Idea guardada')
     } catch {
       toast.error('Error al guardar')
@@ -84,9 +104,10 @@ export default function IdeaDetailPage() {
     if (!id || !idea) return
 
     setProcessing(true)
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     try {
-      // Save first
       setProcessingStep('Guardando idea...')
       await ideasApi.update(id, {
         title: title.trim(),
@@ -96,8 +117,8 @@ export default function IdeaDetailPage() {
         affectedAreas: mode === 'complex' ? affectedAreas.trim() || null : null,
         structuralNotes: mode === 'complex' ? structuralNotes.trim() || null : null,
       })
+      setIsDirty(false)
 
-      // Check clarification
       setProcessingStep('Analizando si necesita aclaración...')
       const { data: clarification } = await ideasApi.checkClarification(id)
 
@@ -109,27 +130,31 @@ export default function IdeaDetailPage() {
         return
       }
 
-      // Process with AI
-      setProcessingStep('Enviando a Claude...')
-      await new Promise(r => setTimeout(r, 500))
-      setProcessingStep('Enviando a GPT...')
-      await new Promise(r => setTimeout(r, 500))
-      setProcessingStep('Combinando respuestas con Claude...')
+      setProcessingStep('Enviando a Claude y GPT, combinando respuestas...')
+      await ideasApi.process(id, controller.signal)
 
-      await ideasApi.process(id)
-
-      // Refresh idea
       const { data: refreshed } = await ideasApi.get(id)
       setIdea(refreshed)
       setActiveTab('result')
       toast.success('Idea procesada exitosamente')
     } catch (err: any) {
-      const msg = err?.response?.data?.message || 'Error al procesar'
-      toast.error(msg)
+      if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') {
+        toast('Procesamiento cancelado')
+      } else {
+        const msg = err?.response?.data?.message || 'Error al procesar'
+        toast.error(msg)
+      }
     } finally {
       setProcessing(false)
       setProcessingStep('')
+      abortControllerRef.current = null
     }
+  }
+
+  const handleCancelProcessing = () => {
+    abortControllerRef.current?.abort()
+    setProcessing(false)
+    setProcessingStep('')
   }
 
   const handleClarificationAnswered = async () => {
@@ -141,6 +166,7 @@ export default function IdeaDetailPage() {
 
   const handleCheckNaming = async () => {
     const text = `${title}\n${description}\n${projectContext}\n${affectedAreas}\n${structuralNotes}`
+    setCheckingNames(true)
     try {
       const { data } = await ideasApi.checkNaming(text)
       setNamingSuggestions(data.suggestions)
@@ -149,6 +175,8 @@ export default function IdeaDetailPage() {
       }
     } catch {
       toast.error('Error al verificar nombres')
+    } finally {
+      setCheckingNames(false)
     }
   }
 
@@ -160,8 +188,19 @@ export default function IdeaDetailPage() {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const handleDownloadHandoff = () => {
+    if (!idea?.handoffText) return
+    const blob = new Blob([idea.handoffText], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `handoff-${idea.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}.md`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const handleDelete = async () => {
-    if (!id || !confirm('¿Eliminar esta idea?')) return
+    if (!id) return
     try {
       await ideasApi.delete(id)
       toast.success('Idea eliminada')
@@ -183,6 +222,24 @@ export default function IdeaDetailPage() {
     setIdea(data)
   }
 
+  const handleShowVersions = async () => {
+    if (!id) return
+    try {
+      const { data } = await ideasApi.listVersions(id)
+      setVersions(data)
+      setShowVersions(true)
+    } catch {
+      toast.error('Error al cargar versiones')
+    }
+  }
+
+  const handleNavigateAway = () => {
+    if (isDirty) {
+      if (!window.confirm('Tienes cambios sin guardar. ¿Salir de todos modos?')) return
+    }
+    navigate('/ideas')
+  }
+
   if (loading) {
     return (
       <div className="p-8 max-w-5xl mx-auto">
@@ -199,25 +256,44 @@ export default function IdeaDetailPage() {
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
+      <ConfirmDialog
+        open={deleteConfirm}
+        title="Eliminar idea"
+        message={`¿Estás seguro de eliminar "${idea.title}"? Esta acción no se puede deshacer.`}
+        confirmLabel="Eliminar"
+        variant="danger"
+        onConfirm={() => { setDeleteConfirm(false); handleDelete() }}
+        onCancel={() => setDeleteConfirm(false)}
+      />
+
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <button
-          onClick={() => navigate('/ideas')}
+          onClick={handleNavigateAway}
           className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700"
         >
           <ArrowLeft size={16} />
           Volver a Ideas
+          {isDirty && <span className="ml-1 text-amber-500 text-xs">(sin guardar)</span>}
         </button>
         <div className="flex items-center gap-2">
           <button
             onClick={handleCheckNaming}
-            className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg hover:bg-gray-50"
+            disabled={checkingNames}
+            className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50"
             title="Verificar consistencia de nombres"
           >
-            Verificar Nombres
+            {checkingNames ? 'Verificando...' : 'Verificar Nombres'}
           </button>
           <button
-            onClick={handleDelete}
+            onClick={handleShowVersions}
+            className="p-2 text-gray-400 hover:text-cubo-600 rounded-lg hover:bg-cubo-50"
+            title="Historial de versiones"
+          >
+            <History size={16} />
+          </button>
+          <button
+            onClick={() => setDeleteConfirm(true)}
             className="p-2 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50"
             title="Eliminar idea"
           >
@@ -227,7 +303,43 @@ export default function IdeaDetailPage() {
       </div>
 
       {/* Processing overlay */}
-      {processing && <AIProcessingView step={processingStep} />}
+      {processing && (
+        <AIProcessingView step={processingStep} onCancel={handleCancelProcessing} />
+      )}
+
+      {/* Version history panel */}
+      {showVersions && (
+        <div className="mb-6 p-4 bg-gray-50 rounded-xl border border-gray-200">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-sm text-gray-800 flex items-center gap-1.5">
+              <History size={16} />
+              Historial de Versiones
+            </h3>
+            <button onClick={() => setShowVersions(false)} className="text-xs text-gray-500 hover:text-gray-700">
+              Cerrar
+            </button>
+          </div>
+          {versions.length === 0 ? (
+            <p className="text-sm text-gray-400">No hay versiones anteriores</p>
+          ) : (
+            <div className="space-y-1.5">
+              {versions.map(v => (
+                <div key={v.id} className="flex items-center gap-3 text-sm px-3 py-2 bg-white rounded-lg border border-gray-100">
+                  <span className="font-mono text-xs text-gray-400">v{v.version}</span>
+                  <span className="text-gray-600">{new Date(v.createdAt).toLocaleString('es-MX')}</span>
+                  {v.recommendation && (
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                      v.recommendation === 'agent' ? 'bg-orange-50 text-orange-600' : 'bg-blue-50 text-blue-600'
+                    }`}>
+                      {v.recommendation}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 mb-6 bg-gray-100 p-1 rounded-lg w-fit">
@@ -260,7 +372,7 @@ export default function IdeaDetailPage() {
           <div className="grid grid-cols-2 gap-3">
             <button
               type="button"
-              onClick={() => setMode('simple')}
+              onClick={() => { setMode('simple'); markDirty() }}
               className={`p-3 rounded-xl border-2 text-left transition-all ${
                 mode === 'simple'
                   ? 'border-cubo-500 bg-cubo-50'
@@ -274,7 +386,7 @@ export default function IdeaDetailPage() {
             </button>
             <button
               type="button"
-              onClick={() => setMode('complex')}
+              onClick={() => { setMode('complex'); markDirty() }}
               className={`p-3 rounded-xl border-2 text-left transition-all ${
                 mode === 'complex'
                   ? 'border-purple-500 bg-purple-50'
@@ -290,27 +402,23 @@ export default function IdeaDetailPage() {
 
           {/* Title */}
           <div>
-            <label htmlFor="title" className="block text-sm font-medium text-gray-700 mb-1">
-              Título
-            </label>
+            <label htmlFor="title" className="block text-sm font-medium text-gray-700 mb-1">Título</label>
             <input
               id="title"
               type="text"
               value={title}
-              onChange={(e) => setTitle(e.target.value)}
+              onChange={(e) => { setTitle(e.target.value); markDirty() }}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cubo-500 focus:border-cubo-500 outline-none"
             />
           </div>
 
           {/* Description */}
           <div>
-            <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-1">
-              Descripción
-            </label>
+            <label htmlFor="description" className="block text-sm font-medium text-gray-700 mb-1">Descripción</label>
             <textarea
               id="description"
               value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              onChange={(e) => { setDescription(e.target.value); markDirty() }}
               rows={6}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cubo-500 focus:border-cubo-500 outline-none resize-y"
             />
@@ -321,93 +429,46 @@ export default function IdeaDetailPage() {
             <div className="space-y-4 p-4 bg-purple-50/50 rounded-xl border border-purple-100">
               <h3 className="text-sm font-semibold text-purple-800">Detalles del Cambio Complejo</h3>
               <div>
-                <label htmlFor="projectContext" className="block text-sm font-medium text-gray-700 mb-1">
-                  Contexto del Proyecto
-                </label>
-                <textarea
-                  id="projectContext"
-                  value={projectContext}
-                  onChange={(e) => setProjectContext(e.target.value)}
-                  placeholder="¿Qué proyecto es? ¿Tecnologías? ¿Estado actual?"
-                  rows={3}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cubo-500 focus:border-cubo-500 outline-none resize-y"
-                />
+                <label htmlFor="projectContext" className="block text-sm font-medium text-gray-700 mb-1">Contexto del Proyecto</label>
+                <textarea id="projectContext" value={projectContext} onChange={(e) => { setProjectContext(e.target.value); markDirty() }}
+                  placeholder="¿Qué proyecto es? ¿Tecnologías? ¿Estado actual?" rows={3}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cubo-500 focus:border-cubo-500 outline-none resize-y" />
               </div>
               <div>
-                <label htmlFor="affectedAreas" className="block text-sm font-medium text-gray-700 mb-1">
-                  Áreas Afectadas
-                </label>
-                <textarea
-                  id="affectedAreas"
-                  value={affectedAreas}
-                  onChange={(e) => setAffectedAreas(e.target.value)}
-                  placeholder="Frontend, Backend, DB, API..."
-                  rows={2}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cubo-500 focus:border-cubo-500 outline-none resize-y"
-                />
+                <label htmlFor="affectedAreas" className="block text-sm font-medium text-gray-700 mb-1">Áreas Afectadas</label>
+                <textarea id="affectedAreas" value={affectedAreas} onChange={(e) => { setAffectedAreas(e.target.value); markDirty() }}
+                  placeholder="Frontend, Backend, DB, API..." rows={2}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cubo-500 focus:border-cubo-500 outline-none resize-y" />
               </div>
               <div>
-                <label htmlFor="structuralNotes" className="block text-sm font-medium text-gray-700 mb-1">
-                  Notas Estructurales
-                </label>
-                <textarea
-                  id="structuralNotes"
-                  value={structuralNotes}
-                  onChange={(e) => setStructuralNotes(e.target.value)}
-                  placeholder="Cambios de arquitectura, módulos nuevos..."
-                  rows={2}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cubo-500 focus:border-cubo-500 outline-none resize-y"
-                />
+                <label htmlFor="structuralNotes" className="block text-sm font-medium text-gray-700 mb-1">Notas Estructurales</label>
+                <textarea id="structuralNotes" value={structuralNotes} onChange={(e) => { setStructuralNotes(e.target.value); markDirty() }}
+                  placeholder="Cambios de arquitectura, módulos nuevos..." rows={2}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-cubo-500 focus:border-cubo-500 outline-none resize-y" />
               </div>
             </div>
           )}
 
-          {/* Naming suggestions */}
           {namingSuggestions.length > 0 && (
-            <NamingSuggestions
-              suggestions={namingSuggestions}
-              onDismiss={() => setNamingSuggestions([])}
-            />
+            <NamingSuggestions suggestions={namingSuggestions} onDismiss={() => setNamingSuggestions([])} />
           )}
 
-          {/* Clarification dialog */}
           {showClarification && (
-            <ClarificationDialog
-              ideaId={idea.id}
-              questions={idea.questions}
-              onAnswered={handleClarificationAnswered}
-            />
+            <ClarificationDialog ideaId={idea.id} questions={idea.questions} onAnswered={handleClarificationAnswered} />
           )}
 
-          {/* File attachments */}
-          <FileUploadZone
-            ideaId={idea.id}
-            attachments={idea.attachments}
-            onChanged={handleAttachmentUploaded}
-          />
-
-          {/* Diagrams */}
-          <DiagramSection
-            ideaId={idea.id}
-            diagrams={idea.diagrams}
-            onChanged={handleDiagramsChanged}
-          />
+          <FileUploadZone ideaId={idea.id} attachments={idea.attachments} onChanged={handleAttachmentUploaded} />
+          <DiagramSection ideaId={idea.id} diagrams={idea.diagrams} onChanged={handleDiagramsChanged} />
 
           {/* Actions */}
           <div className="flex justify-between items-center pt-4 border-t border-gray-200">
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="flex items-center gap-2 px-4 py-2 text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50"
-            >
+            <button onClick={handleSave} disabled={saving}
+              className="flex items-center gap-2 px-4 py-2 text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50">
               <Save size={16} />
               {saving ? 'Guardando...' : 'Guardar'}
             </button>
-            <button
-              onClick={handleProcess}
-              disabled={processing || !title.trim() || !description.trim()}
-              className="flex items-center gap-2 px-5 py-2.5 bg-cubo-600 text-white rounded-lg hover:bg-cubo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium"
-            >
+            <button onClick={handleProcess} disabled={processing || !title.trim() || !description.trim()}
+              className="flex items-center gap-2 px-5 py-2.5 bg-cubo-600 text-white rounded-lg hover:bg-cubo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors font-medium">
               <Sparkles size={18} />
               {processing ? 'Procesando...' : 'Procesar con AI'}
             </button>
@@ -416,46 +477,40 @@ export default function IdeaDetailPage() {
       ) : (
         /* Result tab */
         <div className="space-y-6">
-          {/* Recommendation badge */}
           {idea.recommendation && (
             <div className={`p-4 rounded-xl border-2 ${
-              idea.recommendation === 'agent'
-                ? 'border-orange-200 bg-orange-50'
-                : 'border-blue-200 bg-blue-50'
+              idea.recommendation === 'agent' ? 'border-orange-200 bg-orange-50' : 'border-blue-200 bg-blue-50'
             }`}>
-              <div className="flex items-center justify-between">
-                <div>
-                  <span className={`text-lg font-bold ${
-                    idea.recommendation === 'agent' ? 'text-orange-700' : 'text-blue-700'
-                  }`}>
-                    Recomendado: {idea.recommendation === 'agent' ? 'Agent Mode' : 'Plan Mode'}
-                  </span>
-                  {idea.recommendReason && (
-                    <p className="text-sm mt-1 text-gray-600">{idea.recommendReason}</p>
-                  )}
-                </div>
-              </div>
+              <span className={`text-lg font-bold ${
+                idea.recommendation === 'agent' ? 'text-orange-700' : 'text-blue-700'
+              }`}>
+                Recomendado: {idea.recommendation === 'agent' ? 'Agent Mode' : 'Plan Mode'}
+              </span>
+              {idea.recommendReason && <p className="text-sm mt-1 text-gray-600">{idea.recommendReason}</p>}
             </div>
           )}
 
-          {/* Handoff */}
           {idea.handoffText && (
             <div>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="font-semibold text-gray-900">Handoff para Cursor</h3>
-                <button
-                  onClick={handleCopyHandoff}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-cubo-600 text-white rounded-lg hover:bg-cubo-700 transition-colors"
-                >
-                  {copied ? <Check size={14} /> : <Copy size={14} />}
-                  {copied ? 'Copiado' : 'Copiar'}
-                </button>
+                <div className="flex gap-2">
+                  <button onClick={handleDownloadHandoff}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600">
+                    <Download size={14} />
+                    .md
+                  </button>
+                  <button onClick={handleCopyHandoff}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-cubo-600 text-white rounded-lg hover:bg-cubo-700 transition-colors">
+                    {copied ? <Check size={14} /> : <Copy size={14} />}
+                    {copied ? 'Copiado' : 'Copiar'}
+                  </button>
+                </div>
               </div>
               <HandoffDisplay text={idea.handoffText} />
             </div>
           )}
 
-          {/* Individual AI responses */}
           {(idea.claudeResponse || idea.gptResponse) && (
             <details className="group">
               <summary className="cursor-pointer text-sm font-medium text-gray-600 hover:text-gray-800">
@@ -484,20 +539,14 @@ export default function IdeaDetailPage() {
             </details>
           )}
 
-          {/* Re-process button */}
           <div className="flex justify-end pt-4 border-t border-gray-200">
             <div className="flex gap-3">
-              <button
-                onClick={() => setActiveTab('edit')}
-                className="px-4 py-2 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50"
-              >
+              <button onClick={() => setActiveTab('edit')}
+                className="px-4 py-2 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50">
                 Editar Idea
               </button>
-              <button
-                onClick={handleProcess}
-                disabled={processing}
-                className="flex items-center gap-2 px-5 py-2.5 bg-cubo-600 text-white rounded-lg hover:bg-cubo-700 disabled:opacity-50 transition-colors font-medium"
-              >
+              <button onClick={handleProcess} disabled={processing}
+                className="flex items-center gap-2 px-5 py-2.5 bg-cubo-600 text-white rounded-lg hover:bg-cubo-700 disabled:opacity-50 transition-colors font-medium">
                 <Sparkles size={18} />
                 Re-procesar
               </button>
