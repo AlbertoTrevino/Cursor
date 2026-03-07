@@ -17,9 +17,11 @@ model User {
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
-  workflows     Workflow[]
-  apiKeys       ApiKey[]
-  uploadedFiles UploadedFile[]
+  workflows          Workflow[]
+  apiKeys            ApiKey[]
+  uploadedFiles      UploadedFile[]
+  ideas              Idea[]
+  fabricConnections  FabricConnection[]
 
   @@map("users")
 }
@@ -207,4 +209,126 @@ model UploadedFile {
 
   @@index([userId])
   @@map("uploaded_files")
+}
+
+// ─── IDEAS (Idea Description Generator) ───
+
+model Idea {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  title       String
+  description String   @db.Text
+  mode        String   @default("simple") // "simple" | "complex"
+  status      String   @default("draft")  // "draft" | "clarifying" | "processing" | "done"
+
+  // AI results
+  claudeResponse   String? @map("claude_response") @db.Text
+  gptResponse      String? @map("gpt_response") @db.Text
+  mergedResponse   String? @map("merged_response") @db.Text
+
+  // Final handoff
+  handoffText      String? @map("handoff_text") @db.Text
+  recommendation   String? // "plan" | "agent"
+  recommendReason  String? @map("recommend_reason") @db.Text
+
+  // Complex mode extra fields
+  projectContext   String? @map("project_context") @db.Text
+  affectedAreas    String? @map("affected_areas") @db.Text
+  structuralNotes  String? @map("structural_notes") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  attachments IdeaAttachment[]
+  diagrams    IdeaDiagram[]
+  questions   IdeaClarification[]
+  versions    IdeaVersion[]
+
+  @@index([userId])
+  @@map("ideas")
+}
+
+model IdeaAttachment {
+  id           String   @id @default(uuid())
+  ideaId       String   @map("idea_id")
+  originalName String   @map("original_name")
+  mimeType     String   @map("mime_type")
+  storagePath  String   @map("storage_path")
+  sizeBytes    Int      @map("size_bytes")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+
+  @@index([ideaId])
+  @@map("idea_attachments")
+}
+
+model IdeaDiagram {
+  id           String   @id @default(uuid())
+  ideaId       String   @map("idea_id")
+  name         String   @default("Diagram")
+  diagramData  Json?    @map("diagram_data")
+  imagePath    String?  @map("image_path")
+  storagePath  String?  @map("storage_path")
+  sourceType   String   @default("excalidraw") @map("source_type") // "excalidraw" | "upload"
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+
+  @@index([ideaId])
+  @@map("idea_diagrams")
+}
+
+model IdeaClarification {
+  id        String   @id @default(uuid())
+  ideaId    String   @map("idea_id")
+  question  String   @db.Text
+  answer    String?  @db.Text
+  ordering  Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+
+  @@index([ideaId])
+  @@map("idea_clarifications")
+}
+
+model IdeaVersion {
+  id              String   @id @default(uuid())
+  ideaId          String   @map("idea_id")
+  version         Int
+  claudeResponse  String?  @map("claude_response") @db.Text
+  gptResponse     String?  @map("gpt_response") @db.Text
+  mergedResponse  String?  @map("merged_response") @db.Text
+  handoffText     String?  @map("handoff_text") @db.Text
+  recommendation  String?
+  recommendReason String?  @map("recommend_reason") @db.Text
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+
+  @@unique([ideaId, version])
+  @@index([ideaId])
+  @@map("idea_versions")
+}
+
+model FabricConnection {
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  name           String
+  config         Json     @default("{}")
+  encryptedSecret String? @map("encrypted_secret")
+  secretIv       String?  @map("secret_iv")
+  secretAuthTag  String?  @map("secret_auth_tag")
+  status         String   @default("disconnected") // "connected" | "disconnected" | "error"
+  lastError      String?  @map("last_error") @db.Text
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("fabric_connections")
 }

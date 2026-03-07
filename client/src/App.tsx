@@ -7,6 +7,9 @@ import RegisterPage from '@/pages/RegisterPage'
 import DashboardPage from '@/pages/DashboardPage'
 import WorkflowEditorPage from '@/pages/WorkflowEditorPage'
 import SettingsPage from '@/pages/SettingsPage'
+import IdeasDashboardPage from '@/pages/IdeasDashboardPage'
+import NewIdeaPage from '@/pages/NewIdeaPage'
+import IdeaDetailPage from '@/pages/IdeaDetailPage'
 import AppShell from '@/components/layout/AppShell'
 import { Loader2 } from 'lucide-react'
 
@@ -67,6 +70,9 @@ export default function App() {
                 <Routes>
                   <Route path="/" element={<DashboardPage />} />
                   <Route path="/flujo/:id" element={<WorkflowEditorPage />} />
+                  <Route path="/ideas" element={<IdeasDashboardPage />} />
+                  <Route path="/ideas/nueva" element={<NewIdeaPage />} />
+                  <Route path="/ideas/:id" element={<IdeaDetailPage />} />
                   <Route path="/configuracion" element={<SettingsPage />} />
                 </Routes>
               </AppShell>

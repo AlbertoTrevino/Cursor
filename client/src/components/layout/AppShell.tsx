@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Settings, LogOut, Menu, X } from 'lucide-react'
+import { LayoutDashboard, Settings, LogOut, Menu, X, Lightbulb } from 'lucide-react'
 import { useAuthStore } from '@/store/authStore'
 import { authApi } from '@/api/auth.api'
 
@@ -38,6 +38,18 @@ export default function AppShell({ children }: AppShellProps) {
       >
         <LayoutDashboard size={18} />
         Mis Flujos
+      </Link>
+      <Link
+        to="/ideas"
+        onClick={() => setSidebarOpen(false)}
+        className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium ${
+          location.pathname.startsWith('/ideas')
+            ? 'bg-cubo-50 text-cubo-700'
+            : 'text-gray-600 hover:bg-gray-50'
+        }`}
+      >
+        <Lightbulb size={18} />
+        Mis Ideas
       </Link>
       <Link
         to="/configuracion"

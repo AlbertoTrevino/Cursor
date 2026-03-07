@@ -7,3 +7,11 @@ export const authRateLimit = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 })
+
+export const aiRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { message: 'Demasiadas solicitudes de AI, intenta en 1 minuto' },
+  standardHeaders: true,
+  legacyHeaders: false,
+})
