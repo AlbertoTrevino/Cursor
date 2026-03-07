@@ -10,6 +10,8 @@ import workflowRoutes from './routes/workflow.routes.js'
 import apiKeyRoutes from './routes/apiKey.routes.js'
 import executionRoutes from './routes/execution.routes.js'
 import uploadRoutes from './routes/upload.routes.js'
+import ideaRoutes from './routes/idea.routes.js'
+import fabricRoutes from './routes/fabric.routes.js'
 
 const app = express()
 
@@ -24,6 +26,8 @@ app.use('/api/workflows', workflowRoutes)
 app.use('/api/api-keys', apiKeyRoutes)
 app.use('/api/executions', executionRoutes)
 app.use('/api/files', uploadRoutes)
+app.use('/api/ideas', ideaRoutes)
+app.use('/api/fabric', fabricRoutes)
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })
